@@ -4,11 +4,19 @@ using System.Net.Sockets;
 using System.Collections.Generic;
 using System.Text;
 using System.Threading.Tasks;
+using System.Threading;
 
 namespace Server
 {
     class Server
     {
+        #region Запросы клиентов
+        const int Heartbeat = 0;
+        const int Disconnect = 1;
+        const int Request = 2;
+        const int SendMessage = 3;
+        #endregion
+
         TcpListener server;
         public Status status;
         Action<string> logger;
@@ -29,38 +37,57 @@ namespace Server
             server.Start(15);
             while (true)
             {
-                if (status == Status.Working)
-                    await server.AcceptSocketAsync().ContinueWith(Handler);
-                else
-                    break;
+                try
+                {
+                    if (status == Status.Working)
+                    {
+                        Socket s = await server.AcceptSocketAsync();
+                        Task t = new Task(() => Handler(s));
+                        t.Start();
+                    }
+                    else
+                        break;
+                }
+                catch(Exception e)
+                {
+                    if(!(e is ObjectDisposedException))
+                        logger($"Исключение: {e}");
+                }
             }
         }
 
         public async Task Stop()
         {
             status = Status.Stoping;
-            while (!server.Pending()) ;
+            while (server.Pending()) ;
             server.Stop();
             logger("Остановка сервера");
         }
 
-        private async Task Handler(Task<Socket> task)
+        private void Handler(Socket socket)
         {
-            var message = GetMessage(task.Result);
-            if (message == null)
-                return;
-            switch(message.messageType)
+            while (status == Status.Working)
             {
-                case Message.MessageType.Heartbeat:
-                    break;
-                case Message.MessageType.Disconect:
-                    break;
-                case Message.MessageType.Request:
-                    break;
-                case Message.MessageType.Send:
-                    break;
+                var message = GetMessage(socket);
+                if (message == null)
+                    continue;
+                switch (message.messageType)
+                {
+                    case Message.MessageType.Heartbeat:
+                        HandleHeartbeat(socket, message.content);
+                        break;
+                    case Message.MessageType.Disconect:
+                        if (HandleDisconect(socket, message.content))
+                            return;
+                        break;
+                    case Message.MessageType.Request:
+                        HandleRequest(socket);
+                        break;
+                    case Message.MessageType.Send:
+                        HandleSend(socket, message.content);
+                        break;
+                }
             }
-            return;
         }
 
         private Message GetMessage(Socket socket)
@@ -71,14 +98,18 @@ namespace Server
             {
                 switch(buffer[0])
                 {
-                    case 0:
-                        return new Message(Message.MessageType.Heartbeat, Encoding.UTF8.GetString(buffer, count - 1, 1));
-                    case 1:
-                        return new Message(Message.MessageType.Disconect, Encoding.UTF8.GetString(buffer, count - 1, 1));
-                    case 2:
+                    case Heartbeat:
+                        return new Message(Message.MessageType.Heartbeat, Encoding.UTF8.GetString(buffer, 1, count - 1));
+                    case Disconnect:
+                        return new Message(Message.MessageType.Disconect, Encoding.UTF8.GetString(buffer, 1, count - 1));
+                    case Request:
                         return new Message(Message.MessageType.Request, "");
-                    case 3:
-                        return new Message(Message.MessageType.Send, Encoding.UTF8.GetString(buffer, count - 1, 1));
+                    case SendMessage:
+                        return new Message(Message.MessageType.Send, Encoding.UTF8.GetString(buffer, 1, count - 1));
+                    default:
+                        socket.Send(buffer, 0, count, SocketFlags.None);
+                        Thread.Sleep(50);
+                        break;
                 }
             }
             return null;
@@ -98,18 +129,24 @@ namespace Server
 
             if (current == null)
             {
+                logger($"Подключение {content}");
                 users.Add(new User(content, DateTime.Now), socket);
-                socket.Send(new byte[1] { 0 });
+                socket.Send(new byte[1] { 255 });
             }
             else if (users[current] == socket)
+            {
+                logger($"Heartbeat от {content}");
                 current.lastTime = DateTime.Now;
+                socket.Send(new byte[1] { 255 });
+            }
             else
             {
-                socket.Send(new byte[1] { 1 });
+                logger($"Совпадение {content}");
+                socket.Send(new byte[1] { 250 });
             }
         }
 
-        private void HandleDisconect(Socket socket, string content)
+        private bool HandleDisconect(Socket socket, string content)
         {
             User current = null;
             foreach (var u in users.Keys)
@@ -122,27 +159,71 @@ namespace Server
             }
             if (current != null && socket == users[current])
             {
+                logger($"Отключение {content}");
                 users.Remove(current);
-                socket.Send(new byte[1] { 0 });
+                socket.Send(new byte[1] { 254 });
                 socket.Disconnect(true);
+                return true;
             }
             else
             {
-                socket.Send(new byte[1] { 1 });
+                logger($"Ошибка отключения {content}");
+                socket.Send(new byte[1] { 250 });
+                return false;
             }
         }
 
         private void HandleRequest(Socket socket)
         {
+            logger($"Запрос списка");
             StringBuilder list = new StringBuilder();
-            foreach (var key in users.Keys)
-                list.AppendLine(key.username);
-            socket.Send(Encoding.UTF8.GetBytes(list.ToString()));
+            foreach (var key in this.users.Keys)
+                list.Append(key.username + '\n');
+            byte[] users = Encoding.UTF8.GetBytes(list.ToString());
+            byte[] buffer = new byte[users.Length + 1];
+            buffer[0] = 253;
+            for (int i = 0; i < users.Length; i++)
+                buffer[i + 1] = users[i];
+            socket.Send(buffer);
         }
 
         private void HandleSend(Socket socket, string content)
         {
+            string[] strs = content.Split(new char[] { '\n' }, 3, StringSplitOptions.RemoveEmptyEntries);
+            User from = null;
+            User to = null;
+            foreach(var u in users.Keys)
+            {
+                if (u.username == strs[0])
+                    from = u;
+                if (u.username == strs[1])
+                    to = u;
+            }
 
+            if(from != null && to != null && users[from] == socket)
+            {
+                logger($"Сообщение {from.username} -> {to.username}");
+                byte[] fromBuff = Encoding.UTF8.GetBytes(strs[0]);
+                byte[] messBuff = Encoding.UTF8.GetBytes(strs[2]);
+                byte[] buffer = new byte[fromBuff.Length + messBuff.Length + 2];
+                buffer[0] = 251;
+                for (int i = 0; i < fromBuff.Length; i++)
+                    buffer[i + 1] = fromBuff[i];
+                buffer[fromBuff.Length + 1] = (byte)'\n';
+                for (int i = 0; i < messBuff.Length; i++)
+                    buffer[fromBuff.Length + i + 2] = messBuff[i];
+                users[to].Send(buffer);
+                socket.Send(new byte[1] { 252 });
+            }
+            else
+            {
+                logger($"Ощибка сообщения {from.username} -> {to.username}");
+                if(from != null)
+                    socket.Send(new byte[1] { 250 });
+                else
+                    socket.Send(new byte[1] { 249 });
+
+            }
         }
 
         private class Message

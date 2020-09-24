@@ -38,7 +38,7 @@ namespace Server
             else if(server.status == Status.Waiting)
             {
                 (sender as Button).Text = "Стоп";
-                server.Start().Start();
+                server.Start();
             }
         }
 
@@ -49,7 +49,12 @@ namespace Server
 
         private void WriteLog(string msg)
         {
-            Invoke(new Action(() => log.Items.Add(msg)));
+            Invoke(new Action(() =>
+            {
+                log.Items.Add(msg);
+                log.SelectedIndex = log.Items.Count - 1;
+                log.SelectedIndex = -1;
+            }));
         }
     }
 }

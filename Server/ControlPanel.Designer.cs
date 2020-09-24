@@ -40,6 +40,7 @@
             | System.Windows.Forms.AnchorStyles.Left) 
             | System.Windows.Forms.AnchorStyles.Right)));
             this.log.FormattingEnabled = true;
+            this.log.HorizontalScrollbar = true;
             this.log.Location = new System.Drawing.Point(3, 16);
             this.log.Name = "log";
             this.log.Size = new System.Drawing.Size(379, 199);
